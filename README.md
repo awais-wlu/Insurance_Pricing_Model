@@ -1,6 +1,9 @@
 # Insurance_Pricing_Model
 Frequency-severity auto insurance pricing using ZINB and Gamma GLMs (R, RMarkdown)
 
+## Live Demo
+
+View the fully rendered model here: [Insurance Pricing Model](https://awais-wlu.github.io/Insurance_Pricing_Model/)
 
 ## Project Summary for Recruiters
 
@@ -28,5 +31,4 @@ All sensitive information is anonymized, and the dataset is used solely for educ
 - **Modeling:** Build regression models (linear regression and regularized regression) to predict insurance premiums.
 - **Model Evaluation:** Evaluate model performance using metrics such as RMSE, MAE, and R-squared.
 - **Visualization:** Generate plots to explore data distributions, relationships, and model performance.
-
 
