@@ -1,0 +1,250 @@
+---
+title: "Auto Insurance Frequency-Severity Modelling"
+author: "Muhammad Awais"
+output: html_document
+date: "2025-09-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this project, I build a frequency-severity model for automobile insurance claims using the French Motor Third-Party Liability dataset (freMTPL2freq and freMTPL2sev). The goal is to predict expected pure premiums for policyholders by separately modeling claim frequency and severity, then combining them into a pricing model.
+
+I begin by loading the required R packages for data manipulation, visualization, and modeling.
+
+## Loading Libraries
+
+```{r, error=FALSE}
+library(tidyverse)
+library(broom)
+library(ggplot2)
+library(MASS)
+library(dplyr)
+library(patchwork)
+library(pscl)
+
+```
+
+The dataset consists of two linked files: one with claim frequency information and one with claim severity. I import both and join them on the policy identifier. Missing claim amounts are set to zero to represent policies with no claims.
+
+```{r}
+freq <- read.csv("freMTPL2freq.csv")
+sev <- read.csv("freMTPL2sev.csv")
+
+head(freq)
+str(freq)
+head(sev)
+str(sev)
+
+
+```
+
+```{r}
+
+df <- full_join(freq, sev, by = "IDpol")
+
+
+df <- df|>
+  mutate(ClaimAmount = replace_na(ClaimAmount, 0))
+
+
+```
+
+```{r}
+
+str(df)
+
+
+```
+
+To prepare the data, I filter out extreme values such as very old drivers, unusually high claim counts, and vehicles with unrealistic ages. I also convert categorical variables such as vehicle brand, fuel type, and region into factors for modeling.
+
+```{r}
+
+df <- df |>
+  filter(ClaimNb <= 4) |>
+  filter(Exposure <= 1) |>
+  filter(DrivAge <= 90) |>
+  filter(VehAge <= 40) |>
+  mutate(across(c(VehBrand, VehGas, Area, Region), as.factor))
+
+str(df)
+
+
+```
+
+Before modeling, I explore the distribution of claim counts. Most policies have zero claims, with the frequency dropping sharply as the number of claims increases. This suggests strong overdispersion, motivating the use of a negative binomial or zero-inflated model for frequency.
+
+```{r}
+
+df |>
+  count(ClaimNb) |>
+  ggplot(aes(x = factor(ClaimNb), y = n)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_text(aes(label = scales::comma(n)), 
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  labs(title = "Distribution of Claim Counts",
+       x = "Number of Claims", y = "Count") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma) 
+  
+
+```
+
+I fit a zero-inflated negative binomial (ZINB) model to account for excess zeros and overdispersion in claim counts. The model uses driver and vehicle characteristics as predictors, with exposure included as an offset.
+
+```{r}
+
+zinb_model <- zeroinfl(
+  ClaimNb ~ Area + VehPower + VehAge + DrivAge + BonusMalus + 
+             VehBrand + VehGas + Density + Region + offset(log(Exposure)) | 1,
+  data = df,
+  dist = "negbin"
+)
+
+summary(zinb_model)
+```
+
+The summary confirms that several covariates significantly influence claim frequency.
+
+For claim severity, I restrict the dataset to positive claims only. The claim amount distribution is highly skewed, which is typical for insurance losses. I fit a Gamma GLM with a log link to model the conditional claim amount.
+
+```{r}
+
+df_sev <- df |> 
+  filter(ClaimAmount > 0)
+
+str(df_sev)
+
+
+```
+
+```{r}
+
+
+
+p1 <- ggplot(df, aes(x = ClaimAmount)) +
+  geom_histogram(bins = 15, fill = "blue", color = "black") +
+  labs(title = "Claim Amount including zero values",
+       x = "Claim Amount")
+
+p2 <- ggplot(df_sev, aes(x = log(ClaimAmount))) +
+  geom_histogram(bins = 15, fill = "red", color = "black") +
+  labs(title = "Claim Amount excluding zero values",
+       x = "Log(Claim Amount)")
+
+combined_plot <- p1 + p2
+
+combined_plot
+
+
+```
+
+```{r}
+median(df_sev$ClaimAmount)
+mean(df_sev$ClaimAmount)
+var(df_sev$ClaimAmount)
+sd(df_sev$ClaimAmount)
+
+
+```
+
+```{r}
+
+sev_model <- glm(ClaimAmount ~ Area + VehPower + VehAge + DrivAge + 
+                 BonusMalus + VehBrand + VehGas + Density + Region,
+                 data = df_sev,
+                 family = Gamma(link = "log")) 
+
+summary(sev_model)
+
+```
+
+The results show that driver and vehicle characteristics also explain some variation in claim severity.
+
+```{r}
+df$pred_freq <- predict(zinb_model, type = "response")
+
+df <- df |>
+  mutate(pred_decile = ntile(pred_freq, 10))  
+
+calibration <- df |>
+  group_by(pred_decile) |>
+  summarise(
+    avg_pred = mean(pred_freq),
+    avg_actual = mean(ClaimNb), 
+    .groups = "drop"
+  )
+
+ggplot(calibration, aes(x = avg_pred, y = avg_actual)) +
+  geom_point(size = 3, color = "blue") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Calibration of Frequency Model (Deciles)",
+       x = "Average Predicted Frequency",
+       y = "Average Actual Frequency") +
+  theme_minimal()
+
+
+
+```
+
+To evaluate the models, I compare predicted vs. observed outcomes. For frequency, I assess calibration across deciles of predicted risk. For severity, I compare predicted amounts to observed claim amounts. While the models are not perfectly accurate, they capture general trends in the data.
+
+```{r}
+df_sev$pred_sev <- predict(sev_model, type = "response")
+
+ggplot(df_sev, aes(x = pred_sev, y = ClaimAmount)) +
+  geom_point(alpha = 0.3, color = "darkred") +
+  xlim(0, 12500)+
+  ylim(0, 12500)+
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Observed vs Predicted Severity (Gamma GLM)",
+       x = "Predicted Claim Amount", y = "Observed Claim Amount") +
+  theme_minimal()
+
+
+
+```
+
+```{r}
+
+df$pred_freq <- predict(zinb_model, newdata = df, type = "response")
+
+df_sev$pred_sev <- predict(sev_model, newdata = df_sev, type = "response")
+
+df_sev_unique <- df_sev |>
+  group_by(IDpol) |>
+  summarise(pred_sev = mean(pred_sev, na.rm = TRUE))
+
+df <- left_join(df, df_sev_unique, by = "IDpol")
+
+mean_sev <- mean(df$pred_sev, na.rm = TRUE)
+df$pred_sev <- ifelse(is.na(df$pred_sev), mean_sev, df$pred_sev)
+
+df$pure_premium <- df$pred_freq * df$pred_sev
+loading <- 0.25
+df$premium <- df$pure_premium * (1 + loading)
+
+head(df[, c("IDpol", "ClaimNb", "ClaimAmount", "pred_freq", "pred_sev", "pure_premium", "premium")])
+
+
+
+```
+
+With frequency and severity models built, I combine them to compute the pure premium for each policyholder. The pure premium is the expected claim cost, equal to predicted frequency multiplied by predicted severity. A 25% loading factor is then added to obtain the final premium.
+
+```{r}
+ggplot(df, aes(x = pure_premium)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Predicted Pure Premiums",
+       x = "Pure Premium", y = "Number of Policyholders") +
+  xlim(0, 500)
+  theme_minimal()
+
+
+```
+
+The distribution of predicted pure premiums shows that most policyholders are expected to have relatively low annual claim costs, but a small proportion of policies are associated with much higher expected costs. This matches the typical risk profile observed in insurance portfolios.
+
+In this project, I applied frequency-severity modeling to automobile insurance data. A zero-inflated negative binomial model was used for claim frequency, and a Gamma GLM was used for claim severity. Together, these models allowed me to estimate pure premiums and visualize the distribution of expected risk across the portfolio. While the models could be improved with additional feature engineering or alternative distributions, they demonstrate a standard actuarial approach to pricing and risk modeling.
